@@ -89,7 +89,7 @@ function makePng(w, h) {
 //   mode 'image'  → a 600px image appears in <target>
 //   mode 'text'   → only a refusal sentence appears
 //   imgSrc        → image URL; default is a canvas data URL
-function mockPage({ mode, target = 'chat', imgSrc = '' }) {
+function mockPage({ mode, target = 'chat', imgSrc = '', blobImage = false }) {
     return `<!doctype html><html><body>
 <div id="chat"><img id="avatar" width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div>
 <div id="elsewhere"></div>
@@ -107,7 +107,15 @@ $('#send').onclick = () => {
   setTimeout(() => {
     $('#stop').style.display = 'none';
     if ('${mode}' === 'image') {
-      const img = new Image(); img.src = '${imgSrc}' || png; $('#${target}').appendChild(img);
+      const img = new Image();
+      if (${blobImage}) {
+        // Like Gemini: a blob: URL, shown smaller than its real size.
+        const c2 = document.createElement('canvas'); c2.width = 600; c2.height = 600;
+        const x2 = c2.getContext('2d'); x2.fillStyle = '#36c'; x2.fillRect(0, 0, 600, 600);
+        c2.toBlob((b) => { img.src = URL.createObjectURL(b); img.style.width = '300px'; $('#${target}').appendChild(img); });
+      } else {
+        img.src = '${imgSrc}' || png; $('#${target}').appendChild(img);
+      }
     } else {
       $('#reply').innerText = 'Sorry, I cannot create that image.';
     }
@@ -135,6 +143,8 @@ async function withMock(pageOpts, fn) {
     const cdnUrl = `http://127.0.0.1:${cdn.address().port}/fox.png`;
     const web = http.createServer((req, res) => {
         res.setHeader('content-type', 'text/html');
+        // 'none' blocks every fetch(), which is what stops the driver reading a blob: URL.
+        if (pageOpts.blobImage) res.setHeader('content-security-policy', "connect-src 'none'; img-src 'self' data: blob:");
         res.end(mockPage({ ...pageOpts, imgSrc: pageOpts.crossOrigin ? cdnUrl : '' }));
     });
     await new Promise((r) => web.listen(0, '127.0.0.1', r));
@@ -181,6 +191,14 @@ test('downloads a cross-origin image whose CDN blocks reads from the page (no CO
         const out = await generateImage({ browser, site, prompt: 'x', aspectRatio: '1:1', timeoutMs: 30000 });
         assertPng(out);
         assert.equal(out.width, 600);
+    }));
+
+test('reads a blob: image at full resolution when the page blocks fetch (CSP)', e2e, () =>
+    withMock({ mode: 'image', blobImage: true }, async ({ browser, site }) => {
+        const out = await generateImage({ browser, site, prompt: 'x', aspectRatio: '1:1', timeoutMs: 30000 });
+        assertPng(out);
+        // Shown at 300px, but the canvas copy must carry the real 600px pixels.
+        assert.equal(out.buffer.readUInt32BE(16), 600);
     }));
 
 test('reports a text-only answer instead of hanging, and saves a diagnostics report', e2e, () =>

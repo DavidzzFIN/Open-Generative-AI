@@ -144,6 +144,22 @@ async function downloadImage(browser, page, src) {
             if (out.buffer.length > 2048) return out;
         } catch { /* try next variant / fallback */ }
     }
+    // blob:/data: images (Gemini) can be unreadable by fetch under the page's CSP, but they
+    // are same-origin, so the original pixels can be copied through a canvas.
+    try {
+        const dataUrl = await page.evaluate((url) => {
+            const img = [...document.images].find((i) => (i.currentSrc || i.src) === url);
+            if (!img) throw new Error('image element not found');
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            canvas.getContext('2d').drawImage(img, 0, 0);
+            return canvas.toDataURL('image/png'); // throws if the image is cross-origin (tainted)
+        }, src);
+        const out = parseDataUrl(dataUrl);
+        if (out.buffer.length > 2048) return out;
+    } catch { /* cross-origin: fall through */ }
+
     let failure = 'fetch blocked';
     if (!/^blob:|^data:/.test(src)) {
         const tab = await browser.newPage();
