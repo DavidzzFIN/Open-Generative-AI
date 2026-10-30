@@ -12,7 +12,7 @@
 // Google's API terms and may conflict with their Terms of Use. The user decides
 // whether to use their own account this way.
 
-const { ipcMain, app, BrowserWindow, dialog } = require('electron');
+const { ipcMain, app, BrowserWindow, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { siteForModel, SITES } = require('./webAiSites');
@@ -24,6 +24,7 @@ const MIN_GAP_MS = 8000;
 const DATA_DIR = () => path.join(app.getPath('userData'), 'web-ai');
 const CONFIG_FILE = () => path.join(app.getPath('userData'), 'local-ai', 'webai.json');
 const OUT_DIR = () => path.join(DATA_DIR(), 'outputs');
+const DEBUG_DIR = () => path.join(DATA_DIR(), 'debug');
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 function readConfig() {
@@ -94,6 +95,7 @@ function generate(params) {
                 aspectRatio: params.aspect_ratio,
                 onProgress: send,
                 signal: abort.signal,
+                debugDir: DEBUG_DIR(),
             });
 
             fs.mkdirSync(OUT_DIR(), { recursive: true });
@@ -155,6 +157,13 @@ async function pickBrowser() {
     return res.filePaths[0];
 }
 
+// Opens the folder holding the last failure's screenshot + page report.
+async function revealDebug() {
+    fs.mkdirSync(DEBUG_DIR(), { recursive: true });
+    await shell.openPath(DEBUG_DIR());
+    return { path: DEBUG_DIR() };
+}
+
 function register() {
     ipcMain.handle('web-ai:get-config', () => readConfig());
     ipcMain.handle('web-ai:set-config', (_, cfg) => writeConfig(cfg || {}));
@@ -163,6 +172,7 @@ function register() {
     ipcMain.handle('web-ai:pick-browser', () => pickBrowser());
     ipcMain.handle('web-ai:generate', (_, params) => generate(params));
     ipcMain.handle('web-ai:cancel-generation', () => cancelGeneration());
+    ipcMain.handle('web-ai:reveal-debug', () => revealDebug());
 }
 
 module.exports = { register, generate, cancelGeneration };

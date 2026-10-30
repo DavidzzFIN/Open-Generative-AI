@@ -4,6 +4,8 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
+const zlib = require('node:zlib');
+const { execSync } = require('node:child_process');
 
 const { findBrowser, candidatePaths, ensureBrowser } = require('../electron/lib/webAiBrowser');
 const { fullResVariants, parseDataUrl, generateImage } = require('../electron/lib/webAiDriver');
@@ -52,12 +54,45 @@ test('findBrowser prefers an explicit path, then well-known locations, else null
 let puppeteer = null;
 try { puppeteer = require('puppeteer-core'); } catch { /* optional in CI */ }
 const chromePath = findBrowser();
+const e2e = { skip: !puppeteer || !chromePath ? 'puppeteer-core or a Chromium browser is not available' : false };
+
+function crc32(buf) {
+    let crc = 0xffffffff;
+    for (const b of buf) {
+        crc ^= b;
+        for (let k = 0; k < 8; k++) crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+}
+function makePng(w, h) {
+    const chunk = (type, data) => {
+        const body = Buffer.concat([Buffer.from(type), data]);
+        const out = Buffer.alloc(8 + data.length + 4);
+        out.writeUInt32BE(data.length, 0);
+        body.copy(out, 4);
+        out.writeUInt32BE(crc32(body), 8 + data.length);
+        return out;
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+    const row = Buffer.alloc(1 + w * 3, 0x80);
+    row[0] = 0;
+    const raw = Buffer.concat(Array.from({ length: h }, () => row));
+    return Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0)),
+    ]);
+}
 
 // A tiny chat UI: contenteditable prompt, send button, a "stop" button while busy, and a
 // generated image (plus a small avatar that must be ignored) appearing after a delay.
-function mockPage({ mode }) {
+//   mode 'image'  → a 600px image appears in <target>
+//   mode 'text'   → only a refusal sentence appears
+//   imgSrc        → image URL; default is a canvas data URL
+function mockPage({ mode, target = 'chat', imgSrc = '' }) {
     return `<!doctype html><html><body>
 <div id="chat"><img id="avatar" width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div>
+<div id="elsewhere"></div>
 <div id="p" contenteditable="true" role="textbox"></div>
 <button id="send">send</button><button id="stop" style="display:none">stop</button>
 <div id="reply"></div>
@@ -72,7 +107,7 @@ $('#send').onclick = () => {
   setTimeout(() => {
     $('#stop').style.display = 'none';
     if ('${mode}' === 'image') {
-      const img = new Image(); img.src = png; $('#chat').appendChild(img);
+      const img = new Image(); img.src = '${imgSrc}' || png; $('#${target}').appendChild(img);
     } else {
       $('#reply').innerText = 'Sorry, I cannot create that image.';
     }
@@ -92,57 +127,72 @@ function mockSite(url) {
     };
 }
 
-const e2e = { skip: !puppeteer || !chromePath ? 'puppeteer-core or a Chromium browser is not available' : false };
-
-test('generateImage types the prompt, waits for the new large image and downloads it', e2e, async () => {
-    const server = http.createServer((req, res) => { res.setHeader('content-type', 'text/html'); res.end(mockPage({ mode: 'image' })); });
-    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+// Serves the mock chat (and, on a second origin with no CORS headers, a PNG — like Google's CDN).
+async function withMock(pageOpts, fn) {
+    const png = makePng(600, 600);
+    const cdn = http.createServer((req, res) => { res.setHeader('content-type', 'image/png'); res.end(png); });
+    await new Promise((r) => cdn.listen(0, '127.0.0.1', r));
+    const cdnUrl = `http://127.0.0.1:${cdn.address().port}/fox.png`;
+    const web = http.createServer((req, res) => {
+        res.setHeader('content-type', 'text/html');
+        res.end(mockPage({ ...pageOpts, imgSrc: pageOpts.crossOrigin ? cdnUrl : '' }));
+    });
+    await new Promise((r) => web.listen(0, '127.0.0.1', r));
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'webai-test-'));
     const port = 9400 + Math.floor(Math.random() * 400);
     let browser;
     try {
         browser = await ensureBrowser({ puppeteer, userDataDir: profile, executablePath: chromePath, port, extraArgs: ['--headless=new'] });
+        return await fn({ browser, site: mockSite(`http://127.0.0.1:${web.address().port}/`), profile });
+    } finally {
+        await browser?.disconnect();
+        try { execSync(`pkill -f "remote-debugging-port=${port}"`); } catch { /* already gone */ }
+        web.close(); cdn.close();
+    }
+}
+
+const assertPng = (out) => {
+    assert.equal(out.mime, 'image/png');
+    assert.ok(out.buffer.length > 1000);
+    assert.deepEqual([...out.buffer.subarray(1, 4)], [0x50, 0x4e, 0x47]); // PNG magic
+};
+
+test('generateImage types the prompt, waits for the new large image and downloads it', e2e, () =>
+    withMock({ mode: 'image' }, async ({ browser, site }) => {
         const progress = [];
         const out = await generateImage({
-            browser,
-            site: mockSite(`http://127.0.0.1:${server.address().port}/`),
-            prompt: 'a red fox',
-            aspectRatio: '1:1',
-            timeoutMs: 30000,
+            browser, site, prompt: 'a red fox', aspectRatio: '1:1', timeoutMs: 30000,
             onProgress: (p) => progress.push(p.status),
         });
-        assert.equal(out.mime, 'image/png');
+        assertPng(out);
         assert.equal(out.width, 600);
-        assert.ok(out.buffer.length > 1000);
-        assert.deepEqual([...out.buffer.subarray(1, 4)], [0x50, 0x4e, 0x47]); // PNG magic
         assert.ok(progress.includes('starting') && progress.includes('generating') && progress.includes('saving'));
         const [page] = (await browser.pages()).filter((p) => p.url().startsWith('http://127.0.0.1'));
         assert.equal(await page.evaluate(() => window.__sent), 'Create an image (1:1): a red fox');
-    } finally {
-        await browser?.disconnect();
-        browser?.process?.()?.kill();
-        const { execSync } = require('node:child_process');
-        try { execSync(`pkill -f "remote-debugging-port=${port}"`); } catch { /* already gone */ }
-        server.close();
-    }
-});
+    }));
 
-test('generateImage reports a text-only answer instead of hanging', e2e, async () => {
-    const server = http.createServer((req, res) => { res.setHeader('content-type', 'text/html'); res.end(mockPage({ mode: 'text' })); });
-    await new Promise((r) => server.listen(0, '127.0.0.1', r));
-    const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'webai-test-'));
-    const port = 9400 + Math.floor(Math.random() * 400);
-    let browser;
-    try {
-        browser = await ensureBrowser({ puppeteer, userDataDir: profile, executablePath: chromePath, port, extraArgs: ['--headless=new'] });
+test('finds the image even when the site renders it outside the expected container', e2e, () =>
+    withMock({ mode: 'image', target: 'elsewhere' }, async ({ browser, site }) => {
+        assertPng(await generateImage({ browser, site, prompt: 'x', aspectRatio: '1:1', timeoutMs: 30000 }));
+    }));
+
+test('downloads a cross-origin image whose CDN blocks reads from the page (no CORS)', e2e, () =>
+    withMock({ mode: 'image', crossOrigin: true }, async ({ browser, site }) => {
+        const out = await generateImage({ browser, site, prompt: 'x', aspectRatio: '1:1', timeoutMs: 30000 });
+        assertPng(out);
+        assert.equal(out.width, 600);
+    }));
+
+test('reports a text-only answer instead of hanging, and saves a diagnostics report', e2e, () =>
+    withMock({ mode: 'text' }, async ({ browser, site, profile }) => {
+        const debugDir = path.join(profile, 'debug');
         await assert.rejects(
-            generateImage({ browser, site: mockSite(`http://127.0.0.1:${server.address().port}/`), prompt: 'x', aspectRatio: '1:1', timeoutMs: 60000 }),
+            generateImage({ browser, site, prompt: 'x', aspectRatio: '1:1', timeoutMs: 60000, debugDir }),
             (err) => err.code === 'NO_IMAGE' && /cannot create that image/.test(err.message)
         );
-    } finally {
-        await browser?.disconnect();
-        const { execSync } = require('node:child_process');
-        try { execSync(`pkill -f "remote-debugging-port=${port}"`); } catch { /* already gone */ }
-        server.close();
-    }
-});
+        const report = JSON.parse(fs.readFileSync(path.join(debugDir, 'last-failure.json'), 'utf-8'));
+        assert.equal(report.error.code, 'NO_IMAGE');
+        assert.ok(report.images.length >= 1 && 'inside' in report.images[0], 'lists the page images');
+        assert.ok(report.buttons.includes('send'));
+        assert.ok(fs.statSync(path.join(debugDir, 'last-failure.png')).size > 500);
+    }));

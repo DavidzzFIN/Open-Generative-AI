@@ -274,6 +274,7 @@ function WebAiConfigBar() {
         <div class="flex items-center gap-2 flex-wrap">
             <button id="webai-signin-chatgpt" class="${secondaryBtn}">${t('localModels.webaiSignInChatgpt')}</button>
             <button id="webai-signin-gemini" class="${secondaryBtn}">${t('localModels.webaiSignInGemini')}</button>
+            <button id="webai-debug" class="${secondaryBtn}">${t('localModels.webaiDebug')}</button>
         </div>
         <div id="webai-status" class="text-[11px] text-muted whitespace-pre-wrap break-words"></div>
     `;
@@ -303,6 +304,7 @@ function WebAiConfigBar() {
         await localAI.setWebAiConfig({ browserPath: browserInput.value.trim() });
         await refresh();
     };
+    wrap.querySelector('#webai-debug').onclick = () => localAI.revealWebAiDebug();
     for (const [id, site] of [['#webai-signin-chatgpt', 'chatgpt'], ['#webai-signin-gemini', 'gemini']]) {
         const btn = wrap.querySelector(id);
         btn.onclick = async () => {

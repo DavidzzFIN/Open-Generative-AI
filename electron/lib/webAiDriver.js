@@ -2,6 +2,9 @@
 // Pure puppeteer-core logic: it receives an already-connected Browser, so it can
 // be exercised in tests against a mock page without Electron.
 
+const fs = require('fs');
+const path = require('path');
+
 const MIN_IMAGE_PX = 400;       // skips avatars, icons and thumbnails
 const POLL_MS = 1000;
 const STABLE_POLLS = 3;         // same image set + not busy for this many polls = done
@@ -52,10 +55,15 @@ async function waitForInputOrLogin(page, site, timeoutMs) {
 function pageSnapshotFn(imageScope, busySel, replySel, minPx, baseline) {
     const base = new Set(baseline);
     const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-    const images = [...document.querySelectorAll(imageScope)]
+    const pick = (nodes) => [...nodes]
         .filter((img) => img.complete && img.naturalWidth >= minPx && img.naturalHeight >= minPx && visible(img))
         .map((img) => ({ src: img.currentSrc || img.src, w: img.naturalWidth, h: img.naturalHeight }))
         .filter((i) => i.src && !base.has(i.src));
+    // Sites reshuffle their markup (Gemini's A/B answer view lives outside the usual
+    // containers), so when the scoped lookup finds nothing, look at every image: the
+    // chat is fresh and `baseline` already excludes what was on the page before.
+    let images = pick(document.querySelectorAll(imageScope));
+    if (!images.length) images = pick(document.images);
     const replies = replySel ? [...document.querySelectorAll(replySel)] : [];
     const last = replies[replies.length - 1];
     return {
@@ -136,29 +144,83 @@ async function downloadImage(browser, page, src) {
             if (out.buffer.length > 2048) return out;
         } catch { /* try next variant / fallback */ }
     }
-    if (/^blob:|^data:/.test(src)) throw new WebAiError('DOWNLOAD_FAILED', 'Could not read the generated image from the page.');
-    const tab = await browser.newPage();
-    try {
-        await tab.goto(src, { waitUntil: 'load', timeout: 30000 });
-        const img = await tab.$('img');
-        if (!img) throw new Error('no image element');
-        const buffer = Buffer.from(await img.screenshot({ type: 'png' }));
-        return { buffer, mime: 'image/png' };
-    } catch (err) {
-        throw new WebAiError('DOWNLOAD_FAILED', `Could not download the generated image: ${err.message}`);
-    } finally {
-        await tab.close().catch(() => {});
+    let failure = 'fetch blocked';
+    if (!/^blob:|^data:/.test(src)) {
+        const tab = await browser.newPage();
+        try {
+            await tab.goto(src, { waitUntil: 'load', timeout: 30000 });
+            const img = await tab.$('img');
+            if (!img) throw new Error('no image element');
+            return { buffer: Buffer.from(await img.screenshot({ type: 'png' })), mime: 'image/png' };
+        } catch (err) {
+            failure = err.message;
+        } finally {
+            await tab.close().catch(() => {});
+        }
     }
+    // Last resort: screenshot the <img> where it is rendered (display size, but always works).
+    try {
+        const marked = await page.evaluate((url) => {
+            const img = [...document.images].find((i) => (i.currentSrc || i.src) === url);
+            if (!img) return false;
+            img.scrollIntoView({ block: 'center' });
+            img.setAttribute('data-webai-target', '1');
+            return true;
+        }, src);
+        const el = marked && await page.$('[data-webai-target]');
+        if (!el) throw new Error('image element not found on the page');
+        return { buffer: Buffer.from(await el.screenshot({ type: 'png' })), mime: 'image/png' };
+    } catch (err) {
+        throw new WebAiError('DOWNLOAD_FAILED', `Could not download the generated image (${failure}; ${err.message}).`);
+    }
+}
+
+// Saves what the page looked like when a run failed, so a broken selector can be diagnosed.
+async function dumpDebug(page, dir, err) {
+    fs.mkdirSync(dir, { recursive: true });
+    const info = await page.evaluate(() => {
+        const trail = (el) => { const t = []; for (let n = el.parentElement; n && t.length < 5; n = n.parentElement) t.push(n.tagName.toLowerCase()); return t.join('<'); };
+        return {
+            url: location.href,
+            title: document.title,
+            images: [...document.images].map((i) => ({
+                src: (i.currentSrc || i.src).slice(0, 140),
+                w: i.naturalWidth, h: i.naturalHeight, complete: i.complete,
+                shown: i.getBoundingClientRect().width > 0,
+                inside: trail(i),
+            })),
+            buttons: [...document.querySelectorAll('button')]
+                .filter((b) => b.getBoundingClientRect().width > 0)
+                .map((b) => (b.getAttribute('aria-label') || b.innerText || '').trim().slice(0, 40))
+                .filter(Boolean).slice(0, 60),
+        };
+    });
+    fs.writeFileSync(path.join(dir, 'last-failure.json'), JSON.stringify({
+        time: new Date().toISOString(),
+        error: { code: err.code, message: err.message },
+        ...info,
+    }, null, 2));
+    await page.screenshot({ path: path.join(dir, 'last-failure.png') }).catch(() => {});
 }
 
 /**
  * @returns {Promise<{buffer: Buffer, mime: string, width: number, height: number, src: string}>}
  */
-async function generateImage({ browser, site, prompt, aspectRatio, timeoutMs = 180000, onProgress = () => {}, signal }) {
-    const checkAbort = () => { if (signal?.aborted) throw new WebAiError('CANCELLED', 'Generation cancelled.'); };
-
+async function generateImage(opts) {
+    const { browser, site, onProgress = () => {}, debugDir } = opts;
     onProgress({ status: 'starting', progress: 0.02, message: `Opening ${site.name}…` });
     const page = await openSitePage(browser, site);
+    try {
+        return await generateOnPage(browser, page, opts);
+    } catch (err) {
+        if (debugDir && err.code !== 'CANCELLED') await dumpDebug(page, debugDir, err).catch(() => {});
+        throw err;
+    }
+}
+
+async function generateOnPage(browser, page, { site, prompt, aspectRatio, timeoutMs = 180000, onProgress = () => {}, signal }) {
+    const checkAbort = () => { if (signal?.aborted) throw new WebAiError('CANCELLED', 'Generation cancelled.'); };
+
     await page.bringToFront();
     await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 45000 }); // fresh chat: no old images in scope
     checkAbort();

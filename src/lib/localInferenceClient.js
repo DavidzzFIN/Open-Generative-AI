@@ -100,6 +100,10 @@ class LocalInferenceClient {
         if (!isLocalAIAvailable()) throw new Error('Web AI only available in the desktop app.');
         return cleanIpcError(() => window.localAI.webai.openSite(siteId));
     }
+    async revealWebAiDebug() {
+        if (!isLocalAIAvailable()) return null;
+        return window.localAI.webai.revealDebug();
+    }
     async pickWebAiBrowser() {
         if (!isLocalAIAvailable()) return null;
         return window.localAI.webai.pickBrowser();

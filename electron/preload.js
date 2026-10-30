@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('localAI', {
         pickBrowser: () => ipcRenderer.invoke('web-ai:pick-browser'),
         generate:   (params) => ipcRenderer.invoke('web-ai:generate', params),
         cancelGeneration: () => ipcRenderer.invoke('web-ai:cancel-generation'),
+        revealDebug: () => ipcRenderer.invoke('web-ai:reveal-debug'),
     },
 
     // Progress events — all engines emit on local-ai:progress
