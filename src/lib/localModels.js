@@ -169,6 +169,28 @@ export const LOCAL_MODEL_CATALOG = [
         aspectRatios: ['16:9', '9:16', '1:1'],
         tags: ['video', 'ltx', 'fast'],
     },
+    // ── Web session: your ChatGPT / Gemini subscription, driven in your own browser ──
+    // No API key and no download. Electron-only; see electron/lib/webAiProvider.js.
+    {
+        id: 'webai:chatgpt-image',
+        name: 'ChatGPT Image (web)',
+        description: 'Uses your ChatGPT subscription through your own Chrome/Edge/Brave. Sign in once; slow (~30-90 s) and subject to your plan limits.',
+        type: 'image',
+        family: 'chatgpt',
+        provider: 'webai',
+        aspectRatios: ['1:1', '3:2', '2:3', '16:9', '9:16'],
+        tags: ['image', 'chatgpt', 'subscription'],
+    },
+    {
+        id: 'webai:gemini-image',
+        name: 'Gemini Image (web)',
+        description: 'Uses your Gemini subscription through your own Chrome/Edge/Brave. Sign in once; slow (~15-60 s) and subject to your plan limits.',
+        type: 'image',
+        family: 'gemini',
+        provider: 'webai',
+        aspectRatios: ['1:1', '3:4', '4:3', '16:9', '9:16'],
+        tags: ['image', 'gemini', 'subscription'],
+    },
 ];
 
 export function getLocalModelById(id) {
@@ -176,6 +198,7 @@ export function getLocalModelById(id) {
 }
 
 export const isWan2gpModelId = (id) => getLocalModelById(id)?.provider === 'wan2gp';
+export const isWebAiModelId  = (id) => getLocalModelById(id)?.provider === 'webai';
 export const isLocalModelId  = (id) => !!getLocalModelById(id);
 
 export const localT2VModels = LOCAL_MODEL_CATALOG.filter(m => m.provider === 'wan2gp' && m.type === 'video' && !m.needsImage);

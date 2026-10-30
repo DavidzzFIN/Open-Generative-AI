@@ -2,11 +2,23 @@
 // Two providers live behind the same surface:
 //   - sd.cpp: bundled engine, downloads weights to disk, runs locally
 //   - wan2gp: user-installed Wan2GP — a local folder (wgp.py CLI) or a remote MCP server
+//   - webai: ChatGPT / Gemini web apps driven in the user's own Chromium-based browser
 // Provider is read off the model entry's `provider` field.
 
 import { getLocalModelById } from './localModels.js';
 
 export const isLocalAIAvailable = () => typeof window !== 'undefined' && !!window.localAI?.isElectron;
+
+// Electron wraps errors thrown in the main process as
+// "Error invoking remote method 'x': Error: message" — keep only the message.
+async function cleanIpcError(fn) {
+    try {
+        return await fn();
+    } catch (err) {
+        const msg = String(err?.message || err).replace(/^Error invoking remote method '[^']*':\s*(\w*Error:\s*)?/, '');
+        throw new Error(msg);
+    }
+}
 
 class LocalInferenceClient {
     // ── sd.cpp APIs ───────────────────────────────────────────────────────
@@ -70,6 +82,29 @@ class LocalInferenceClient {
         });
     }
 
+    // ── Web session (ChatGPT / Gemini) APIs ───────────────────────────────
+    async getWebAiConfig() {
+        if (!isLocalAIAvailable()) return { browserPath: '' };
+        return window.localAI.webai.getConfig();
+    }
+    async setWebAiConfig(cfg) {
+        if (!isLocalAIAvailable()) throw new Error('Web AI only available in the desktop app.');
+        return window.localAI.webai.setConfig(cfg);
+    }
+    async webAiStatus() {
+        if (!isLocalAIAvailable()) return { browserFound: false, connected: false, sites: [] };
+        return window.localAI.webai.status();
+    }
+    // Opens the site's tab in the user's browser so they can sign in.
+    async openWebAiSite(siteId) {
+        if (!isLocalAIAvailable()) throw new Error('Web AI only available in the desktop app.');
+        return cleanIpcError(() => window.localAI.webai.openSite(siteId));
+    }
+    async pickWebAiBrowser() {
+        if (!isLocalAIAvailable()) return null;
+        return window.localAI.webai.pickBrowser();
+    }
+
     // ── Unified model list (both providers merged) ────────────────────────
     async listModels() {
         if (!isLocalAIAvailable()) return [];
@@ -90,6 +125,9 @@ class LocalInferenceClient {
         if (model?.provider === 'wan2gp') {
             return window.localAI.wan2gp.generate(params);
         }
+        if (model?.provider === 'webai') {
+            return cleanIpcError(() => window.localAI.webai.generate(params));
+        }
         return window.localAI.generate(params);
     }
 
@@ -98,6 +136,7 @@ class LocalInferenceClient {
         // Ask both — only the running one reacts.
         window.localAI.cancelGeneration();
         window.localAI.wan2gp.cancelGeneration();
+        window.localAI.webai?.cancelGeneration();
     }
 
     /**

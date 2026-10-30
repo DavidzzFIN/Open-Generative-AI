@@ -253,6 +253,72 @@ function Wan2gpConfigBar(onChange) {
     return wrap;
 }
 
+// ─── Web AI (ChatGPT / Gemini subscription) ─────────────────────────────────
+// Images through the user's own ChatGPT / Gemini plan, driven in their own
+// Chromium-based browser. Sign-in happens in that browser, never in this app.
+function WebAiConfigBar() {
+    const inputClass = 'flex-1 min-w-0 bg-white/5 border border-white/5 focus:border-primary/40 rounded-lg px-3 py-1.5 text-xs text-white placeholder-white/30 focus:outline-none';
+    const secondaryBtn = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-primary/20 text-primary border border-primary/30 hover:bg-primary/30 transition-all shrink-0';
+    const wrap = document.createElement('div');
+    wrap.className = 'flex flex-col gap-3 p-3 rounded-xl bg-white/3 border border-white/5';
+    wrap.innerHTML = `
+        <div class="flex flex-col gap-0.5">
+            <span class="text-xs font-bold text-white">${t('localModels.webaiTitle')}</span>
+            <span class="text-[11px] text-muted leading-relaxed">${t('localModels.webaiHelp')}</span>
+        </div>
+        <div class="flex items-center gap-2">
+            <input id="webai-browser" type="text" placeholder="${t('localModels.webaiBrowserPlaceholder')}" class="${inputClass}"/>
+            <button id="webai-browse" class="${secondaryBtn}">${t('localModels.browse')}</button>
+            <button id="webai-save" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-primary text-black hover:shadow-glow transition-all">${t('localModels.save')}</button>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+            <button id="webai-signin-chatgpt" class="${secondaryBtn}">${t('localModels.webaiSignInChatgpt')}</button>
+            <button id="webai-signin-gemini" class="${secondaryBtn}">${t('localModels.webaiSignInGemini')}</button>
+        </div>
+        <div id="webai-status" class="text-[11px] text-muted whitespace-pre-wrap break-words"></div>
+    `;
+    const browserInput = wrap.querySelector('#webai-browser');
+    const statusEl = wrap.querySelector('#webai-status');
+    const setStatus = (text, kind = 'muted') => {
+        const colorMap = { muted: 'text-muted', ok: 'text-green-400', warn: 'text-yellow-400', err: 'text-red-400' };
+        statusEl.className = `text-[11px] whitespace-pre-wrap break-words ${colorMap[kind] || colorMap.muted}`;
+        statusEl.textContent = text;
+    };
+    const refresh = async () => {
+        const st = await localAI.webAiStatus();
+        if (st.browserFound) setStatus(tf('localModels.webaiBrowserFound', st.browserPath), 'ok');
+        else setStatus(t('localModels.webaiNoBrowser'), 'warn');
+    };
+
+    (async () => {
+        browserInput.value = (await localAI.getWebAiConfig()).browserPath || '';
+        await refresh();
+    })();
+
+    wrap.querySelector('#webai-browse').onclick = async () => {
+        const p = await localAI.pickWebAiBrowser();
+        if (p) browserInput.value = p;
+    };
+    wrap.querySelector('#webai-save').onclick = async () => {
+        await localAI.setWebAiConfig({ browserPath: browserInput.value.trim() });
+        await refresh();
+    };
+    for (const [id, site] of [['#webai-signin-chatgpt', 'chatgpt'], ['#webai-signin-gemini', 'gemini']]) {
+        const btn = wrap.querySelector(id);
+        btn.onclick = async () => {
+            btn.disabled = true;
+            setStatus(t('localModels.webaiOpening'), 'muted');
+            try {
+                await localAI.openWebAiSite(site);
+                setStatus(t('localModels.webaiSignInHint'), 'ok');
+            } catch (err) {
+                setStatus(err.message, 'err');
+            } finally { btn.disabled = false; }
+        };
+    }
+    return wrap;
+}
+
 // ─── Model Card ───────────────────────────────────────────────────────────────
 function Wan2gpModelCard(model) {
     const card = document.createElement('div');
@@ -398,6 +464,7 @@ export function LocalModelManager() {
 
     const wan2gpBar = Wan2gpConfigBar(() => renderModels());
     engineSection.appendChild(wan2gpBar);
+    engineSection.appendChild(WebAiConfigBar());
     root.appendChild(engineSection);
 
     // ── Section: models

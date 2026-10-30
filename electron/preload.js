@@ -30,7 +30,18 @@ contextBridge.exposeInMainWorld('localAI', {
         uploadFile: (payload) => ipcRenderer.invoke('wan2gp:upload-file', payload),
     },
 
-    // Progress events — both engines emit on local-ai:progress
+    // ── Web session: ChatGPT / Gemini through the user's own browser ───────
+    webai: {
+        getConfig:  () => ipcRenderer.invoke('web-ai:get-config'),
+        setConfig:  (cfg) => ipcRenderer.invoke('web-ai:set-config', cfg),
+        status:     () => ipcRenderer.invoke('web-ai:status'),
+        openSite:   (siteId) => ipcRenderer.invoke('web-ai:open-site', siteId),
+        pickBrowser: () => ipcRenderer.invoke('web-ai:pick-browser'),
+        generate:   (params) => ipcRenderer.invoke('web-ai:generate', params),
+        cancelGeneration: () => ipcRenderer.invoke('web-ai:cancel-generation'),
+    },
+
+    // Progress events — all engines emit on local-ai:progress
     onProgress: (callback) => {
         const listener = (_, data) => callback(data);
         ipcRenderer.on('local-ai:progress', listener);
